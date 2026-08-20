@@ -116,6 +116,7 @@ export const ConnectionLogsViewer: React.FC = () => {
           <option value="PostgreSQL">PostgreSQL</option>
           <option value="SQL Server">SQL Server</option>
           <option value="MySQL">MySQL</option>
+          <option value="Oracle">Oracle Database</option>
         </select>
 
         {/* Severity filter */}

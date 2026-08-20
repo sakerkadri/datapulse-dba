@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from "react";
+import React, { createContext, useContext, useState, useEffect, useRef, ReactNode } from "react";
 import {
   DBInstance,
   MetricPoint,
@@ -10,6 +10,12 @@ import {
   EmailTemplate,
   DashboardPreset,
 } from "../types/dba";
+import {
+  StreamSnapshotPayload,
+  StreamTelemetryDeltaPayload,
+  StreamCircuitStatePayload,
+  HeartbeatEvent,
+} from "../types/polling";
 import {
   INITIAL_DATABASES,
   INITIAL_METRIC_HISTORY,
@@ -98,10 +104,15 @@ export const DBAProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [timeRange, setTimeRange] = useState<string>("15m");
   const [refreshRate, setRefreshRate] = useState<number>(3); // 3 seconds live refresh
   const [isStreaming, setIsStreaming] = useState<boolean>(true);
+  const [sseConnected, setSseConnected] = useState<boolean>(false);
 
   const [searchOpen, setSearchOpen] = useState<boolean>(false);
   const [aiModalOpen, setAiModalOpen] = useState<boolean>(false);
   const [aiModalContext, setAiModalContext] = useState<AIModalContextData | null>(null);
+
+  const retryAttemptsRef = useRef<number>(0);
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Sync dark class with document element
   useEffect(() => {
@@ -121,9 +132,216 @@ export const DBAProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setAiModalOpen(true);
   };
 
-  // Real-time metrics tick simulation
+  // Real-time EventSource Live Streaming with Reconnection & Fallback Simulation
   useEffect(() => {
-    if (!isStreaming || refreshRate === 0) return;
+    if (!isStreaming) {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      setSseConnected(false);
+      return;
+    }
+
+    const connectSSE = () => {
+      // Connect to SSE stream
+      try {
+        const streamUrl = `/api/stream/telemetry${
+          selectedDbId !== "ALL" ? `?targetId=${encodeURIComponent(selectedDbId)}` : ""
+        }`;
+        const es = new EventSource(streamUrl);
+        eventSourceRef.current = es;
+
+        es.onopen = () => {
+          setSseConnected(true);
+          retryAttemptsRef.current = 0;
+        };
+
+        // 1. Initial Snapshot
+        es.addEventListener("snapshot", (event: MessageEvent) => {
+          try {
+            const data: StreamSnapshotPayload = JSON.parse(event.data);
+            if (data.instances && data.instances.length > 0) {
+              setDatabases(data.instances);
+            }
+          } catch (err) {
+            console.warn("[SSE] Snapshot parse error:", err);
+          }
+        });
+
+        // 2. Telemetry Delta
+        es.addEventListener("telemetry_delta", (event: MessageEvent) => {
+          try {
+            const data: StreamTelemetryDeltaPayload = JSON.parse(event.data);
+            setDatabases((prevDbs) =>
+              prevDbs.map((db) => {
+                if (db.id === data.instanceId) {
+                  return {
+                    ...db,
+                    ...data.metrics,
+                    lastHealthCheck: "Just now",
+                  };
+                }
+                return db;
+              })
+            );
+
+            // Append to metricsHistory if it matches the selected DB or aggregate
+            if (data.metrics.cpuUsage !== undefined || data.metrics.memoryUsage !== undefined) {
+              const now = new Date(data.timestamp);
+              const hh = String(now.getHours()).padStart(2, "0");
+              const mm = String(now.getMinutes()).padStart(2, "0");
+              const ss = String(now.getSeconds()).padStart(2, "0");
+              const timestamp = `${hh}:${mm}:${ss}`;
+
+              setMetricsHistory((prev) => {
+                const last = prev[prev.length - 1] || {
+                  cpu: 45,
+                  memory: 65,
+                  iops: 1200,
+                  activeConn: 180,
+                  latencyMs: 15,
+                  slowQueries: 2,
+                  replicationLag: 0.1,
+                };
+                const newPoint: MetricPoint = {
+                  timestamp,
+                  cpu: data.metrics.cpuUsage ?? last.cpu,
+                  memory: data.metrics.memoryUsage ?? last.memory,
+                  iops: data.metrics.iops ?? last.iops,
+                  activeConn: data.metrics.activeConnections ?? last.activeConn,
+                  latencyMs: data.metrics.queryLatencyMs ?? last.latencyMs,
+                  slowQueries: data.metrics.slowQueryCount ?? last.slowQueries,
+                  replicationLag: data.metrics.replicationLagSeconds ?? last.replicationLag,
+                };
+                return [...prev.slice(1), newPoint];
+              });
+            }
+          } catch (err) {
+            console.warn("[SSE] Delta parse error:", err);
+          }
+        });
+
+        // 3. Circuit Breaker State Transition
+        es.addEventListener("circuit_state", (event: MessageEvent) => {
+          try {
+            const data: StreamCircuitStatePayload = JSON.parse(event.data);
+            setDatabases((prevDbs) =>
+              prevDbs.map((db) => {
+                if (db.id === data.endpointId) {
+                  const status =
+                    data.state === "OPEN"
+                      ? "CRITICAL"
+                      : data.state === "HALF_OPEN"
+                      ? "HIGH_LOAD"
+                      : "ONLINE";
+                  return { ...db, status };
+                }
+                return db;
+              })
+            );
+
+            if (data.state === "OPEN") {
+              const newLog: ConnectionLog = {
+                id: `log-cb-${Date.now()}`,
+                timestamp: new Date().toLocaleTimeString(),
+                databaseId: data.endpointId,
+                databaseName: data.endpointId,
+                engine: "PostgreSQL",
+                clientIp: "127.0.0.1",
+                username: "system_circuit_breaker",
+                eventType: "CONNECTION_EXHAUSTED",
+                severity: "ERROR",
+                latencyMs: 0,
+                details: `Circuit Breaker TRIPPED to OPEN state. Failures: ${data.consecutiveFailures}. Reason: ${data.reason || "Trip threshold reached"}`,
+              };
+              setLogs((prev) => [newLog, ...prev.slice(0, 49)]);
+            }
+          } catch (err) {
+            console.warn("[SSE] Circuit state parse error:", err);
+          }
+        });
+
+        // 4. Incident Fired
+        es.addEventListener("incident_fired", (event: MessageEvent) => {
+          try {
+            const data: IncidentAlert = JSON.parse(event.data);
+            setIncidents((prev) => {
+              if (prev.some((inc) => inc.id === data.id)) return prev;
+              return [data, ...prev];
+            });
+          } catch (err) {
+            console.warn("[SSE] Incident event parse error:", err);
+          }
+        });
+
+        // 5. Heartbeat Event
+        es.addEventListener("heartbeat", (event: MessageEvent) => {
+          try {
+            const data: HeartbeatEvent = JSON.parse(event.data);
+            setDatabases((prevDbs) =>
+              prevDbs.map((db) => {
+                if (db.id === data.endpointId) {
+                  return {
+                    ...db,
+                    uptimeSeconds: data.uptimeSeconds,
+                    queryLatencyMs: data.latencyMs,
+                    lastHealthCheck: "Just now",
+                  };
+                }
+                return db;
+              })
+            );
+          } catch (err) {
+            console.warn("[SSE] Heartbeat parse error:", err);
+          }
+        });
+
+        es.onerror = () => {
+          setSseConnected(false);
+          es.close();
+          eventSourceRef.current = null;
+
+          // Exponential backoff reconnection with ±25% jitter
+          const attempts = retryAttemptsRef.current;
+          retryAttemptsRef.current += 1;
+          const baseBackoff = Math.min(30000, 1000 * Math.pow(2, attempts));
+          const jitterMultiplier = 0.75 + 0.5 * Math.random();
+          const retryDelayMs = Math.round(baseBackoff * jitterMultiplier);
+
+          reconnectTimeoutRef.current = setTimeout(() => {
+            if (isStreaming) {
+              connectSSE();
+            }
+          }, retryDelayMs);
+        };
+      } catch (err) {
+        console.warn("[SSE] Connection initialization failed, using simulation fallback:", err);
+        setSseConnected(false);
+      }
+    };
+
+    connectSSE();
+
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+    };
+  }, [isStreaming, selectedDbId]);
+
+  // Graceful Fallback Simulation Interval (only active if SSE is disconnected and isStreaming is true)
+  useEffect(() => {
+    if (!isStreaming || sseConnected || refreshRate === 0) return;
 
     const interval = setInterval(() => {
       const now = new Date();
@@ -154,7 +372,15 @@ export const DBAProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       // 2. Append new MetricPoint to metricsHistory
       setMetricsHistory((prev) => {
-        const last = prev[prev.length - 1] || { cpu: 45, memory: 65, iops: 1200, activeConn: 180, latencyMs: 15, slowQueries: 2, replicationLag: 0.1 };
+        const last = prev[prev.length - 1] || {
+          cpu: 45,
+          memory: 65,
+          iops: 1200,
+          activeConn: 180,
+          latencyMs: 15,
+          slowQueries: 2,
+          replicationLag: 0.1,
+        };
         const newCpu = Math.min(99, Math.max(15, last.cpu + (Math.random() - 0.48) * 6));
         const newMem = Math.min(98, Math.max(30, last.memory + (Math.random() - 0.5) * 2));
         const newIops = Math.floor(Math.max(400, last.iops + (Math.random() - 0.5) * 200));
@@ -186,23 +412,34 @@ export const DBAProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           "AUTH_FAILURE",
           "QUERY_TIMEOUT",
         ];
-        const selectedEngine: ConnectionLog["engine"] = Math.random() > 0.5 ? "PostgreSQL" : Math.random() > 0.5 ? "SQL Server" : "MySQL";
+        const selectedEngine: ConnectionLog["engine"] =
+          Math.random() > 0.5 ? "PostgreSQL" : Math.random() > 0.5 ? "SQL Server" : "MySQL";
         const randomEvt = eventTypes[Math.floor(Math.random() * eventTypes.length)];
-        const isError = randomEvt === "AUTH_FAILURE" || randomEvt === "SSL_HANDSHAKE_ERROR" || randomEvt === "CONNECTION_EXHAUSTED";
+        const isError =
+          randomEvt === "AUTH_FAILURE" ||
+          randomEvt === "SSL_HANDSHAKE_ERROR" ||
+          randomEvt === "CONNECTION_EXHAUSTED";
         const isWarn = randomEvt === "QUERY_TIMEOUT" || randomEvt === "MAX_IDLE_TIMEOUT";
 
         const newLog: ConnectionLog = {
           id: `log-${Date.now().toString().slice(-5)}`,
           timestamp,
           databaseId: "db-pg-01",
-          databaseName: selectedEngine === "PostgreSQL" ? "pg-prod-primary-eu" : selectedEngine === "SQL Server" ? "sql-fin-analytics-us" : "mysql-userauth-asia",
+          databaseName:
+            selectedEngine === "PostgreSQL"
+              ? "pg-prod-primary-eu"
+              : selectedEngine === "SQL Server"
+              ? "sql-fin-analytics-us"
+              : "mysql-userauth-asia",
           engine: selectedEngine,
           clientIp: sampleIps[Math.floor(Math.random() * sampleIps.length)],
           username: sampleUsers[Math.floor(Math.random() * sampleUsers.length)],
           eventType: randomEvt,
           severity: isError ? "ERROR" : isWarn ? "WARN" : "INFO",
           latencyMs: Number((1.5 + Math.random() * 25).toFixed(1)),
-          details: isError ? "Authentication challenge or execution delay detected" : "Client session acquired over TLSv1.3",
+          details: isError
+            ? "Authentication challenge or execution delay detected"
+            : "Client session acquired over TLSv1.3",
         };
 
         setLogs((prevLogs) => [newLog, ...prevLogs.slice(0, 49)]);
@@ -210,7 +447,7 @@ export const DBAProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }, refreshRate * 1000);
 
     return () => clearInterval(interval);
-  }, [isStreaming, refreshRate]);
+  }, [isStreaming, sseConnected, refreshRate]);
 
   // Context Action Handlers
   const setCurrentUserRole = (userId: string) => {

@@ -1,3 +1,8 @@
+import type { OracleEngineMetrics } from "./oracle";
+import type { HostMetricsSnapshot } from "./host";
+export * from "./oracle";
+export * from "./host";
+
 export type DatabaseEngine = "PostgreSQL" | "SQL Server" | "MySQL" | "Oracle";
 
 export type IncidentSeverity = "CRITICAL" | "WARNING" | "INFO";
@@ -11,6 +16,8 @@ export interface DBInstance {
   engine: DatabaseEngine;
   version: string;
   host: string;
+  hostId?: string;
+  hostMetrics?: HostMetricsSnapshot;
   port: number;
   databaseName: string;
   status: "ONLINE" | "HIGH_LOAD" | "CRITICAL" | "MAINTENANCE";
@@ -42,6 +49,8 @@ export interface DBInstance {
     innodbBufferHitRatio?: number;
     threadsConnected?: number;
     tableLocksWaiting?: number;
+    // Oracle
+    oracle?: OracleEngineMetrics;
   };
 }
 

@@ -107,10 +107,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
           <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
             <span>Supported Engines:</span>
           </div>
-          <div className="flex items-center gap-2 text-xs font-semibold text-slate-700 dark:text-slate-300">
+          <div className="flex flex-wrap items-center gap-1.5 text-xs font-semibold text-slate-700 dark:text-slate-300">
             <span className="rounded bg-slate-200/70 px-1.5 py-0.5 dark:bg-[#1a1d23] dark:border dark:border-[#272a30]">PostgreSQL</span>
             <span className="rounded bg-slate-200/70 px-1.5 py-0.5 dark:bg-[#1a1d23] dark:border dark:border-[#272a30]">SQL Server</span>
             <span className="rounded bg-slate-200/70 px-1.5 py-0.5 dark:bg-[#1a1d23] dark:border dark:border-[#272a30]">MySQL</span>
+            <span className="rounded bg-slate-200/70 px-1.5 py-0.5 dark:bg-[#1a1d23] dark:border dark:border-[#272a30]">Oracle</span>
           </div>
 
           <div className="flex items-center gap-1.5 pt-2 text-[10px] text-slate-400">

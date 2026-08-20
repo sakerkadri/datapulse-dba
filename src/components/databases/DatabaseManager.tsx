@@ -149,7 +149,9 @@ export const DatabaseManager: React.FC = () => {
                         ? "🐘"
                         : db.engine === "SQL Server"
                         ? "⚡"
-                        : "🐬"}
+                        : db.engine === "MySQL"
+                        ? "🐬"
+                        : "🏛️"}
                     </div>
 
                     <div>
@@ -305,7 +307,7 @@ export const DatabaseManager: React.FC = () => {
                     value={formData.engine}
                     onChange={(e) => {
                       const eng = e.target.value as DatabaseEngine;
-                      const port = eng === "PostgreSQL" ? 5432 : eng === "SQL Server" ? 1433 : 3306;
+                      const port = eng === "PostgreSQL" ? 5432 : eng === "SQL Server" ? 1433 : eng === "MySQL" ? 3306 : 1521;
                       setFormData({ ...formData, engine: eng, port });
                     }}
                     className="mt-1 w-full cursor-pointer rounded-xl border border-slate-200 bg-slate-50 p-2.5 dark:border-slate-700 dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500"
@@ -313,6 +315,7 @@ export const DatabaseManager: React.FC = () => {
                     <option value="PostgreSQL">PostgreSQL</option>
                     <option value="SQL Server">Microsoft SQL Server</option>
                     <option value="MySQL">MySQL</option>
+                    <option value="Oracle">Oracle Database (CDB/PDB)</option>
                   </select>
                 </div>
 

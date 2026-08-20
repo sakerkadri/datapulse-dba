@@ -70,7 +70,7 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab }) => {
             <option value="ALL">🌐 All Monitored Databases ({databases.length})</option>
             {databases.map((db) => (
               <option key={db.id} value={db.id}>
-                {db.engine === "PostgreSQL" ? "🐘" : db.engine === "SQL Server" ? "⚡" : "🐬"} {db.name} ({db.databaseName})
+                {db.engine === "PostgreSQL" ? "🐘" : db.engine === "SQL Server" ? "⚡" : db.engine === "MySQL" ? "🐬" : "🏛️"} {db.name} ({db.databaseName})
               </option>
             ))}
           </select>
